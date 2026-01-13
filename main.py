@@ -5,6 +5,10 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+from prompts import system_prompt
+from call_function import available_functions, call_function
+
+
 load_dotenv()
 
 parser = argparse.ArgumentParser(description="Chatbot")
@@ -25,9 +29,33 @@ client = genai.Client(api_key=api_key)
 
 
 response = client.models.generate_content(
-    model='gemini-2.5-flash', 
-    contents= messages
+    model="gemini-2.5-flash",
+    contents=messages,
+    config=types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        tools=[available_functions],
+        temperature=0,
+    ),
 )
+
+function_calls = response.function_calls
+
+if function_calls:
+    function_results = []
+    for function_call in function_calls:
+        function_call_result = call_function(function_call, verbose=args.verbose)
+        if not function_call_result.parts:
+            raise RuntimeError("No parts returned from function call.")
+        function_response = function_call_result.parts[0].function_response
+        if function_response is None:
+            raise RuntimeError("No function response found.")
+        if function_response.response is None:
+            raise RuntimeError("No response content found.")
+        function_results.append(function_call_result.parts[0])
+        if args.verbose:
+            print(f"-> {function_call_result.parts[0].function_response.response}")
+else:
+    print(response.text)
 
 if response.usage_metadata is None:
     raise RuntimeError("No Usage Metadata Found.")
