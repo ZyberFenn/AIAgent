@@ -28,40 +28,71 @@ if api_key is None:
 client = genai.Client(api_key=api_key)
 
 
-response = client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents=messages,
-    config=types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        tools=[available_functions],
-        temperature=0,
-    ),
-)
+final_response = None
+response_usage = None
+rate_limit_hit = False
 
-function_calls = response.function_calls
+for _ in range(20):
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=messages,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                tools=[available_functions],
+                temperature=0,
+            ),
+        )
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        is_rate_limit = status_code == 429 or "RESOURCE_EXHAUSTED" in str(exc)
+        if is_rate_limit:
+            print("Rate limit exceeded; ending early.")
+            final_response = "Rate limit exceeded. Please retry later."
+            rate_limit_hit = True
+            break
+        raise
 
-if function_calls:
-    function_results = []
-    for function_call in function_calls:
-        function_call_result = call_function(function_call, verbose=args.verbose)
-        if not function_call_result.parts:
-            raise RuntimeError("No parts returned from function call.")
-        function_response = function_call_result.parts[0].function_response
-        if function_response is None:
-            raise RuntimeError("No function response found.")
-        if function_response.response is None:
-            raise RuntimeError("No response content found.")
-        function_results.append(function_call_result.parts[0])
-        if args.verbose:
-            print(f"-> {function_call_result.parts[0].function_response.response}")
-else:
-    print(response.text)
+    response_usage = response.usage_metadata
 
-if response.usage_metadata is None:
+    if response.candidates:
+        for candidate in response.candidates:
+            messages.append(candidate.content)
+
+    function_calls = response.function_calls
+
+    if function_calls:
+        function_results = []
+        for function_call in function_calls:
+            function_call_result = call_function(function_call, verbose=args.verbose)
+            if not function_call_result.parts:
+                raise RuntimeError("No parts returned from function call.")
+            function_response = function_call_result.parts[0].function_response
+            if function_response is None:
+                raise RuntimeError("No function response found.")
+            if function_response.response is None:
+                raise RuntimeError("No response content found.")
+            function_results.append(function_call_result.parts[0])
+            if args.verbose:
+                print(f"-> {function_call_result.parts[0].function_response.response}")
+
+        messages.append(types.Content(role="user", parts=function_results))
+        continue
+
+    final_response = response.text
+    print(final_response)
+    break
+
+if final_response is None:
+    print("Error: Maximum iterations reached without a final response.")
+    raise SystemExit(1)
+
+if response_usage is None and not rate_limit_hit:
     raise RuntimeError("No Usage Metadata Found.")
 
 if args.verbose:
     print(f"User prompt: {args.user_prompt}")
-    print(f"Prompt tokens: {response.usage_metadata.prompt_token_count}")
-    print(f"Response tokens: {response.usage_metadata.candidates_token_count}")
-print(f"Response: {response.text}")
+    if response_usage is not None:
+        print(f"Prompt tokens: {response_usage.prompt_token_count}")
+        print(f"Response tokens: {response_usage.candidates_token_count}")
+print(f"Response: {final_response}")
